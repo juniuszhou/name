@@ -19,6 +19,8 @@ mod benchmarking;
 pub mod pallet {
 	use frame_support::{dispatch::DispatchResultWithPostInfo, pallet_prelude::*};
 	use frame_system::pallet_prelude::*;
+	use sp_std::prelude::*;
+	use sp_io::hashing::keccak_256;
 
 	/// Configure the pallet by specifying the parameters and types on which it depends.
 	#[pallet::config]
@@ -34,10 +36,14 @@ pub mod pallet {
 	// The pallet's runtime storage items.
 	// https://substrate.dev/docs/en/knowledgebase/runtime/storage
 	#[pallet::storage]
-	#[pallet::getter(fn something)]
+	#[pallet::getter(fn owner)]
 	// Learn more about declaring storage items:
 	// https://substrate.dev/docs/en/knowledgebase/runtime/storage#declaring-storage-items
-	pub type Something<T> = StorageValue<_, u32>;
+	pub type Owner<T: Config> = StorageMap<_, Blake2_128Concat, Vec<u8>, T::AccountId>;
+
+	#[pallet::storage]
+	#[pallet::getter(fn register)]
+	pub type Register<T: Config> = StorageMap<_, Blake2_128Concat, [u8; 32], T::AccountId>;
 
 	// Pallets use events to inform users when important changes are made.
 	// https://substrate.dev/docs/en/knowledgebase/runtime/events
@@ -47,60 +53,72 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
-		SomethingStored(u32, T::AccountId),
+		Registered(T::AccountId, [u8; 32]),
+		Claimed(T::AccountId, Vec<u8>),
 	}
 
-	// Errors inform users that something went wrong.
 	#[pallet::error]
 	pub enum Error<T> {
-		/// Error names should be descriptive.
-		NoneValue,
-		/// Errors should have helpful documentation associated with them.
-		StorageOverflow,
+		NameAlreadyRegistered,
+		NameNotRegistered,
+		NameNotRegisteredByYou,
+		NameAlreadyClaimed,
+		NameNotMatchHash,
 	}
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {}
 
-	// Dispatchable functions allows users to interact with the pallet and invoke state changes.
-	// These functions materialize as "extrinsics", which are often compared to transactions.
-	// Dispatchable functions must be annotated with a weight and must return a DispatchResult.
 	#[pallet::call]
 	impl<T:Config> Pallet<T> {
-		/// An example dispatchable that takes a singles value as a parameter, writes the value to
-		/// storage and emits an event. This function must be dispatched by a signed extrinsic.
 		#[pallet::weight(10_000 + T::DbWeight::get().writes(1))]
-		pub fn do_something(origin: OriginFor<T>, something: u32) -> DispatchResultWithPostInfo {
-			// Check that the extrinsic was signed and get the signer.
-			// This function will return an error if the extrinsic is not signed.
-			// https://substrate.dev/docs/en/knowledgebase/runtime/origin
+		pub fn register_name(origin: OriginFor<T>, name_hash: [u8; 32]) -> DispatchResultWithPostInfo {
 			let who = ensure_signed(origin)?;
 
-			// Update storage.
-			<Something<T>>::put(something);
-
-			// Emit an event.
-			Self::deposit_event(Event::SomethingStored(something, who));
-			// Return a successful DispatchResultWithPostInfo
-			Ok(().into())
+			match <Register<T>>::get(name_hash) {
+				Some(old) => Err(Error::<T>::NameAlreadyRegistered)?,
+				None => {
+					<Register<T>>::insert(name_hash, who.clone());
+					Self::deposit_event(Event::Registered(who, name_hash));
+					Ok(().into())
+				},
+			}		
 		}
 
 		/// An example dispatchable that may throw a custom error.
 		#[pallet::weight(10_000 + T::DbWeight::get().reads_writes(1,1))]
-		pub fn cause_error(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
-			let _who = ensure_signed(origin)?;
+		pub fn claim_name(origin: OriginFor<T>, name: Vec<u8>, name_hash: [u8; 32]) -> DispatchResultWithPostInfo {
+			let who = ensure_signed(origin)?;
 
-			// Read a value from storage.
-			match <Something<T>>::get() {
-				// Return an error if the value has not been set.
-				None => Err(Error::<T>::NoneValue)?,
+			Self::validate_name(&name, &name_hash)?;
+
+			match <Register<T>>::get(&name_hash) {
+				None => Err(Error::<T>::NameNotRegistered)?,
 				Some(old) => {
-					// Increment the value read from storage; will error in the event of overflow.
-					let new = old.checked_add(1).ok_or(Error::<T>::StorageOverflow)?;
-					// Update the value in storage with the incremented result.
-					<Something<T>>::put(new);
-					Ok(().into())
+					if old != who.clone() {
+						Err(Error::<T>::NameNotRegisteredByYou)?
+					}
 				},
+			}
+
+			match <Owner<T>>::get(&name) {
+				Some(_) => Err(Error::<T>::NameAlreadyClaimed)?,
+				None => {
+					<Owner<T>>::insert(name.clone(), who.clone());
+					Self::deposit_event(Event::Claimed(who, name));
+					Ok(().into())
+
+				}
+			}
+		}
+	}
+
+	impl<T: Config> Module<T> {
+		fn validate_name(name: &Vec<u8>, name_hash: &[u8; 32]) -> DispatchResultWithPostInfo {
+			if keccak_256(&name[..]) == *name_hash {
+				Ok(().into())
+			} else {
+				Err(Error::<T>::NameNotMatchHash)?
 			}
 		}
 	}
